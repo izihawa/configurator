@@ -1,6 +1,7 @@
 import json
 import os
 import os.path
+import re
 from types import ModuleType
 
 import yaml
@@ -55,21 +56,53 @@ class Configurator(RichDict):
         self._omitted_files = []
 
         env_dict = {}
+        array_dict = {}
 
         if env_prefix:
             env_prefix = env_prefix.lower()
             for name, value in os.environ.items():
                 if name.lower().startswith(env_prefix):
-                    stripped_name = name[len(env_prefix):].lstrip('_')
-                    if stripped_name[-2:] == '[]':
-                        if stripped_name not in env_dict:
-                            env_dict[stripped_name[:-2]] = []
-                        env_dict[stripped_name[:-2]].append(value)
+                    stripped_name = name[len(env_prefix):].lstrip('_').lower()
+                    
+                    # Check for array format: {MAIN_PART}[{index}]
+                    array_match = re.match(r'^(.+)\[(\d+)\]$', stripped_name)
+                    if array_match:
+                        base_name, index_str = array_match.groups()
+                        index = int(index_str)
+                        if base_name not in array_dict:
+                            array_dict[base_name] = {}
+                        array_dict[base_name][index] = value
                     else:
-                        env_dict[stripped_name] = value
+                        # Handle legacy [] format for backward compatibility
+                        if stripped_name.endswith('[]'):
+                            base_name = stripped_name[:-2]
+                            if base_name not in env_dict:
+                                env_dict[base_name] = []
+                            env_dict[base_name].append(value)
+                        else:
+                            env_dict[stripped_name] = value
+            
+            # Convert indexed arrays to lists
+            for base_name, indexed_values in array_dict.items():
+                # Sort by index and convert to list
+                max_index = max(indexed_values.keys()) if indexed_values else -1
+                array = [None] * (max_index + 1)
+                for index, value in indexed_values.items():
+                    array[index] = value
+                env_dict[base_name] = array
+                
             env_dict = unflatten(env_dict, sep=env_key_separator)
 
-        for config in ([os.environ] + configs + [env_dict]):
+        # Create filtered environ that excludes prefix-based variables to avoid duplication
+        filtered_environ = {}
+        if env_prefix:
+            for name, value in os.environ.items():
+                if not name.lower().startswith(env_prefix):
+                    filtered_environ[name] = value
+        else:
+            filtered_environ = dict(os.environ)
+            
+        for config in ([filtered_environ] + configs + [env_dict]):
             file_found = self.update(config)
             if not file_found:
                 self._omitted_files.append(config)
